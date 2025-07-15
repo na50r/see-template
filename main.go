@@ -22,8 +22,32 @@ import (
 )
 
 type Subscription struct {
-	channelID     string
+	topic     string
 	clientChannel chan []byte
+}
+
+type ChannelSet struct {
+	channels map[chan []byte]bool
+}
+
+func NewChannelSet() *ChannelSet {
+	return &ChannelSet{
+		channels: make(map[chan []byte]bool),
+	}
+}
+
+func (cs *ChannelSet) Add(ch chan []byte) {
+	cs.channels[ch] = true
+}
+
+func (cs *ChannelSet) Remove(ch chan []byte) {
+	delete(cs.channels, ch)
+}
+
+func (cs *ChannelSet) Broadcast(msg []byte) {
+	for ch := range cs.channels {
+		ch <- msg
+	}
 }
 
 type Broker struct {
@@ -31,7 +55,7 @@ type Broker struct {
 	Notifier chan []byte
 
 	// Events are pushed to a specitic channel in this map
-	Channels map[string]chan []byte
+	Topics map[string]*ChannelSet
 
 	// New client connections are pushed to this channel
 	newClients chan Subscription
@@ -47,7 +71,7 @@ func NewServer() (broker *Broker) {
 	// Instantiate a broker
 	broker = &Broker{
 		Notifier:       make(chan []byte, 1),
-		Channels:       make(map[string]chan []byte),
+		Topics:         make(map[string]*ChannelSet),
 		newClients:     make(chan Subscription),
 		closingClients: make(chan Subscription),
 		clientChannels: make(map[chan []byte]bool),
@@ -65,15 +89,21 @@ func (broker *Broker) listen() {
 			// A new client has connected.
 			// Register their message channel
 			broker.clientChannels[s.clientChannel] = true
+
+			// Add clientChannel to topics
+			if _, ok := broker.Topics[s.topic]; !ok {
+				broker.Topics[s.topic] = NewChannelSet()
+			}
+			broker.Topics[s.topic].Add(s.clientChannel)
 			log.Printf("Client added. %d registered clients", len(broker.clientChannels))
 		case s := <-broker.closingClients:
 
 			// A client has dettached and we want to
 			// stop sending them messages.
 			delete(broker.clientChannels, s.clientChannel)
+			broker.Topics[s.topic].Remove(s.clientChannel)
 			log.Printf("Removed client. %d registered clients", len(broker.clientChannels))
 		case event := <-broker.Notifier:
-
 			// We got a new event from the outside!
 			// Send event to all connected clients
 			// Event received from global Notifier channel
@@ -97,6 +127,13 @@ type Transaction struct {
 	Amount    float64 `json:"amount"`
 }
 
+func getTopic(r *http.Request) string {
+	vars := mux.Vars(r)
+	id := vars["topic"]
+	return id
+}
+
+
 func (broker *Broker) Stream(w http.ResponseWriter, r *http.Request) {
 	// Check if the ResponseWriter supports flushing.
 	flusher, ok := w.(http.Flusher)
@@ -109,7 +146,11 @@ func (broker *Broker) Stream(w http.ResponseWriter, r *http.Request) {
 	messageChan := make(chan []byte)
 
 	// Signal the broker that we have a new connection
-	s := Subscription{channelID: "default", clientChannel: messageChan}
+	topic := getTopic(r)
+	if topic == "" {
+		topic = "default"
+	}
+	s := Subscription{topic: topic, clientChannel: messageChan}
 	// Very confusing but the messageChannel is passed into newClients
 	// This means that broker.listen will broadcast event to this channel if Notifier received an event
 	broker.newClients <- s
@@ -144,19 +185,17 @@ func (broker *Broker) Stream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// To test the server, run the following commands in separate terminals:
-// Start listening to the stream
-//     $ curl -N http://localhost:<port>/stream
-// Send a message
-//     $ curl -X POST -H "Content-Type: application/json" -d '{"sender": 1, "recipient": 2, "amount": 100"}' http://localhost:<port>/transfer
-
-func (broker *Broker) BroadcastMessage(eventType string, payload interface{}) {
+func (broker *Broker) BroadcastTopic(topic string, eventType string, payload interface{}) {
+	if _, ok := broker.Topics[topic]; !ok {
+		log.Printf("Topic %s does not exist", topic)
+		return
+	}
 	msg := Message{
 		Type: eventType,
 		Data: payload,
 	}
 	j, _ := json.Marshal(msg)
-	broker.Notifier <- j
+	broker.Topics[topic].Broadcast(j)
 }
 
 // Make an endpoint on your server that has access to the broker
@@ -168,10 +207,8 @@ func (broker *Broker) Transfer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Add your logic here
-
 	// Send the message to the broker via Notifier channel
-	broker.BroadcastMessage("transaction", tx)
+	broker.BroadcastTopic("transaction", "transaction", tx)
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte("Transaction sent\n"))
 }
@@ -180,6 +217,7 @@ func main() {
 	broker := NewServer()
 	r := mux.NewRouter()
 	r.HandleFunc("/stream", broker.Stream).Methods("GET")
+	r.HandleFunc("/stream/{topic}", broker.Stream).Methods("GET")
 	r.HandleFunc("/transfer", broker.Transfer).Methods("POST")
 	log.Println("Listening on localhost:3000")
 	err := http.ListenAndServe("localhost:3000", r)
@@ -187,3 +225,9 @@ func main() {
 		log.Fatal(err)
 	}
 }
+
+// To test the server, run the following commands in separate terminals:
+// Start listening to the stream
+//     $ curl http://localhost:<port>/stream/transaction
+// Send a message
+//     $ curl -X POST -H "Content-Type: application/json" -d '{"sender": 1, "recipient": 2, "amount": 100"}' http://localhost:<port>/transfer
