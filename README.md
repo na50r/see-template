@@ -1,4 +1,4 @@
-# Based on: https://thoughtbot.com/blog/writing-a-server-sent-events-server-in-go
+Based on: https://thoughtbot.com/blog/writing-a-server-sent-events-server-in-go
 
 # How the original version worked (High Level)
 * The original version ran `broker.listen` as a goroutine in the background.
