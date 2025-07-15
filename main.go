@@ -1,6 +1,9 @@
 package main
 
 // Based on https://gist.github.com/ismasan/3fb75381cd2deb6bfa9c
+// Original used one global channel to broadcast events to all clients
+// This version broadcasts to a selection of clients
+
 // Copyright (c) 2017 Ismael Celis
 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -22,7 +25,7 @@ import (
 )
 
 type Subscription struct {
-	topic     string
+	topic         string
 	clientChannel chan []byte
 }
 
@@ -51,9 +54,6 @@ func (cs *ChannelSet) Broadcast(msg []byte) {
 }
 
 type Broker struct {
-	// Events are pushed to this channel by the main events-gathering routine
-	Notifier chan []byte
-
 	// Events are pushed to a specitic channel in this map
 	Topics map[string]*ChannelSet
 
@@ -70,7 +70,6 @@ type Broker struct {
 func NewServer() (broker *Broker) {
 	// Instantiate a broker
 	broker = &Broker{
-		Notifier:       make(chan []byte, 1),
 		Topics:         make(map[string]*ChannelSet),
 		newClients:     make(chan Subscription),
 		closingClients: make(chan Subscription),
@@ -103,15 +102,6 @@ func (broker *Broker) listen() {
 			delete(broker.clientChannels, s.clientChannel)
 			broker.Topics[s.topic].Remove(s.clientChannel)
 			log.Printf("Removed client. %d registered clients", len(broker.clientChannels))
-		case event := <-broker.Notifier:
-			// We got a new event from the outside!
-			// Send event to all connected clients
-			// Event received from global Notifier channel
-			// Pass it to all client channels
-			// All of this happens in a Go routine in the background!
-			for cliChan := range broker.clientChannels {
-				cliChan <- event
-			}
 		}
 	}
 }
@@ -132,7 +122,6 @@ func getTopic(r *http.Request) string {
 	id := vars["topic"]
 	return id
 }
-
 
 func (broker *Broker) Stream(w http.ResponseWriter, r *http.Request) {
 	// Check if the ResponseWriter supports flushing.
