@@ -1,4 +1,5 @@
 package main
+
 // Based on https://gist.github.com/ismasan/3fb75381cd2deb6bfa9c
 // Copyright (c) 2017 Ismael Celis
 
@@ -15,37 +16,45 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/gorilla/mux"
 	"log"
 	"net/http"
-	"github.com/gorilla/mux"
 )
+
+type Subscription struct {
+	channelID     string
+	clientChannel chan []byte
+}
 
 type Broker struct {
 	// Events are pushed to this channel by the main events-gathering routine
 	Notifier chan []byte
 
+	// Events are pushed to a specitic channel in this map
+	Channels map[string]chan []byte
+
 	// New client connections are pushed to this channel
-	newClients chan chan []byte
+	newClients chan Subscription
 
 	// Closed client connections are pushed to this channel
-	closingClients chan chan []byte
+	closingClients chan Subscription
 
 	// Client connections registry
-	clients map[chan []byte]bool
+	clientChannels map[chan []byte]bool
 }
 
 func NewServer() (broker *Broker) {
 	// Instantiate a broker
 	broker = &Broker{
 		Notifier:       make(chan []byte, 1),
-		newClients:     make(chan chan []byte),
-		closingClients: make(chan chan []byte),
-		clients:        make(map[chan []byte]bool),
+		Channels:       make(map[string]chan []byte),
+		newClients:     make(chan Subscription),
+		closingClients: make(chan Subscription),
+		clientChannels: make(map[chan []byte]bool),
 	}
 
 	// Set it running - listening and broadcasting events
 	go broker.listen()
-
 	return
 }
 
@@ -53,23 +62,25 @@ func (broker *Broker) listen() {
 	for {
 		select {
 		case s := <-broker.newClients:
-
 			// A new client has connected.
 			// Register their message channel
-			broker.clients[s] = true
-			log.Printf("Client added. %d registered clients", len(broker.clients))
+			broker.clientChannels[s.clientChannel] = true
+			log.Printf("Client added. %d registered clients", len(broker.clientChannels))
 		case s := <-broker.closingClients:
 
 			// A client has dettached and we want to
 			// stop sending them messages.
-			delete(broker.clients, s)
-			log.Printf("Removed client. %d registered clients", len(broker.clients))
+			delete(broker.clientChannels, s.clientChannel)
+			log.Printf("Removed client. %d registered clients", len(broker.clientChannels))
 		case event := <-broker.Notifier:
 
 			// We got a new event from the outside!
 			// Send event to all connected clients
-			for clientMessageChan := range broker.clients {
-				clientMessageChan <- event
+			// Event received from global Notifier channel
+			// Pass it to all client channels
+			// All of this happens in a Go routine in the background!
+			for cliChan := range broker.clientChannels {
+				cliChan <- event
 			}
 		}
 	}
@@ -86,10 +97,6 @@ type Transaction struct {
 	Amount    float64 `json:"amount"`
 }
 
-type RefreshEvent struct {
-	AccountNr int `json:"account_nr"`
-}
-
 func (broker *Broker) Stream(w http.ResponseWriter, r *http.Request) {
 	// Check if the ResponseWriter supports flushing.
 	flusher, ok := w.(http.Flusher)
@@ -102,12 +109,15 @@ func (broker *Broker) Stream(w http.ResponseWriter, r *http.Request) {
 	messageChan := make(chan []byte)
 
 	// Signal the broker that we have a new connection
-	broker.newClients <- messageChan
+	s := Subscription{channelID: "default", clientChannel: messageChan}
+	// Very confusing but the messageChannel is passed into newClients
+	// This means that broker.listen will broadcast event to this channel if Notifier received an event
+	broker.newClients <- s
 
 	// Remove this client from the map of connected clients
 	// when this handler exits.
 	defer func() {
-		broker.closingClients <- messageChan
+		broker.closingClients <- s
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -120,7 +130,7 @@ func (broker *Broker) Stream(w http.ResponseWriter, r *http.Request) {
 		// Listen to connection close and un-register messageChan
 		case <-r.Context().Done():
 			// remove this client from the map of connected clients
-			broker.closingClients <- messageChan
+			broker.closingClients <- s
 			return
 
 		// Listen for incoming messages from messageChan
@@ -166,7 +176,7 @@ func (broker *Broker) Transfer(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Transaction sent\n"))
 }
 
-func main () {
+func main() {
 	broker := NewServer()
 	r := mux.NewRouter()
 	r.HandleFunc("/stream", broker.Stream).Methods("GET")
