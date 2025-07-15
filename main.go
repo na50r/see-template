@@ -50,9 +50,16 @@ func (cs *ChannelSet) Remove(ch chan []byte) {
 
 func (cs *ChannelSet) Broadcast(msg []byte) {
 	for ch := range cs.channels {
-		ch <- msg
+		go func(ch chan []byte) {
+			select {
+			case ch <- msg:
+			default:
+				log.Printf("Failed to send message to client")
+			}
+		}(ch)
 	}
 }
+
 
 type Broker struct {
 	// Events are pushed to a specitic channel in this map
