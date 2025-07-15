@@ -89,19 +89,28 @@ func (broker *Broker) listen() {
 			// Register their message channel
 			broker.clientChannels[s.clientChannel] = true
 
-			// Add clientChannel to topics
+			// Add their channel to the topic
 			if _, ok := broker.Topics[s.topic]; !ok {
 				broker.Topics[s.topic] = NewChannelSet()
 			}
 			broker.Topics[s.topic].Add(s.clientChannel)
 			log.Printf("Client added. %d registered clients", len(broker.clientChannels))
+			log.Printf("Client added to topic %s. %d registered clients", s.topic, len(broker.Topics[s.topic].channels))
 		case s := <-broker.closingClients:
 
 			// A client has dettached and we want to
 			// stop sending them messages.
 			delete(broker.clientChannels, s.clientChannel)
+
+			// Remove their channel from the topic
 			broker.Topics[s.topic].Remove(s.clientChannel)
+
+			// Delete the topic if no channel is registered
+			if len(broker.Topics[s.topic].channels) == 0 {
+				delete(broker.Topics, s.topic)
+			}
 			log.Printf("Removed client. %d registered clients", len(broker.clientChannels))
+			log.Printf("Removed client from topic %s. %d registered clients", s.topic, len(broker.Topics[s.topic].channels))
 		}
 	}
 }
