@@ -10,11 +10,9 @@ import (
 	"net/http"
 )
 
-func main() {
-	b := &Broker{
-		clientChannels: make(map[chan []byte]bool),
-	}
 
+func main() {
+	b := NewBroker()
 	http.HandleFunc("/events", b.sseHandler)
 	http.HandleFunc("/publish", b.PublishEndpoint)
 
@@ -24,7 +22,26 @@ func main() {
 }
 
 type Broker struct {
-	clientChannels map[chan []byte]bool
+	cnt            int
+	clientChannels map[int]chan []byte
+}
+
+
+type Message struct {
+	Data interface{} `json:"data"`
+}
+
+func NewBroker() *Broker {
+	return &Broker{
+		clientChannels: make(map[int]chan []byte),
+		cnt:            0,
+	}
+}
+
+func (b *Broker) createChannel() int {
+	b.cnt++
+	b.clientChannels[b.cnt] = make(chan []byte)
+	return b.cnt
 }
 
 func (b *Broker) sseHandler(w http.ResponseWriter, r *http.Request) {
@@ -33,12 +50,13 @@ func (b *Broker) sseHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	fmt.Println("client connected")
-	channel := make(chan []byte)
-	b.clientChannels[channel] = true
+	channelID := b.createChannel()
+	channel := b.clientChannels[channelID]
+	fmt.Printf("client connected (id=%d)\n", channelID)
 
 	defer func() {
-		delete(b.clientChannels, channel)
+		delete(b.clientChannels, channelID)
+		b.cnt--
 	}()
 
 	clientGone := r.Context().Done()
@@ -48,7 +66,7 @@ func (b *Broker) sseHandler(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-clientGone:
-			fmt.Println("client has disconnected")
+			fmt.Printf("client has disconnected (id=%d)\n", channelID)
 			return
 		case data := <-channel:
 			if _, err := fmt.Fprintf(w, "event:msg\ndata:%s\n\n", data); err != nil {
@@ -60,10 +78,6 @@ func (b *Broker) sseHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type Message struct {
-	Data interface{} `json:"data"`
-}
-
 func (b *Broker) Publish(msg Message) {
 	data, err := json.Marshal(msg.Data)
 	if err != nil {
@@ -71,7 +85,8 @@ func (b *Broker) Publish(msg Message) {
 		return
 	}
 	// Publish to all channels
-	for channel := range b.clientChannels {
+	// NOTE: Not concurrent
+	for _, channel := range b.clientChannels {
 		channel <- data
 	}
 }
