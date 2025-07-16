@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+
+<body>
+	Mem: <span id="mem"></span><br />
+	CPU: <span id="cpu"></span>
+</body>
+
+<script type="text/javascript">
+	const eventSrc = new EventSource("http://localhost:8080/events");
+	const mem = document.getElementById("mem");
+	const cpu = document.getElementById("cpu");
+
+	eventSrc.addEventListener("mem", (event) => {
+		mem.textContent = event.data;
+	});
+
+	eventSrc.addEventListener("cpu", (event) => {
+		cpu.textContent = event.data;
+	});
+
+	eventSrc.addEventListener("msg", (event) => {
+		let data = JSON.parse(event.data);
+		console.log("msg", data);
+	});
+
+	eventSrc.onerror = (err) => {
+		console.log("sse error", err);
+	};
+</script>
+
+</html>
